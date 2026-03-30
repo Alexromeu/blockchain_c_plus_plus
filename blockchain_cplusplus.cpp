@@ -7,6 +7,7 @@
 #include "sha256.h"
 
 const int DIFFICULTY_ADJUSTMENT_INTERVAL = 5; // 5 blocks
+const int TRANSACTION_FEE = 1; 
 const int TARGET_BLOCK_TIME = 10; // seconds
 const size_t MAX_TX_PER_BLOCK = 1000;
 
@@ -26,22 +27,27 @@ public:
     std::vector<TransactionData> data;
     std::time_t timestamp;
     std::string hash;
+    int difficulty;
     int nonce;
 };
 
 class Blockchain {
 public:
     Blockchain();
-    void mineCurrentBlock();
+    void createGenesisBlock();
+    void mineCurrentBlock(const std::string& minerAddress = "NETWORK");//this needs to go to client, not blockchain
+    void addToChain(const Block& newBlock);
     std::vector<Block> getChain() const { return chain; };
     double getBalance(const std::string& address);
+    Block getLatestBlock() const { return chain.back(); };
     std::unordered_map<std::string, double> getBalances() const { return balances; };
-    bool submitTransaction(const TransactionData &tx);
-    
+    bool submitTransaction(const TransactionData &tx);//set tx into block
     void printChain() const;
     void printBlock(const Block& block) const;
     void saveToFile(const std::string& filename) const;
     std::string getDifficultyString() const { return std::string(difficulty, '0'); }
+    bool verifyMinedBlock(const Block& block);
+   
 private:
     std::vector<Block> chain;
     int difficulty = 4; 
@@ -49,38 +55,50 @@ private:
     void adjustDifficulty();
     std::string calculateHash(const Block& block);
     void updateBalances(const Block &block);
+    double calculatePendingSpent(const std::string& sender) const;
 };
 
+
 Blockchain::Blockchain() {
+    createGenesisBlock();
+}
+
+void Blockchain::createGenesisBlock() {
     Block genesisBlock;
     genesisBlock.index = 0;
     genesisBlock.previousHash = "0";
     genesisBlock.data = {};
     genesisBlock.timestamp = std::time(0);
     genesisBlock.hash = this->calculateHash(genesisBlock);
+    genesisBlock.nonce = 0;
+    genesisBlock.difficulty = difficulty;
     chain.push_back(genesisBlock);
 }
 
-void Blockchain::mineCurrentBlock() {
+void Blockchain::mineCurrentBlock(const std::string& minerAddress) {
     Block& current = chain.back();
 
-    // POW
+    TransactionData rewardTx = {"NETWORK", minerAddress, 1.0}; // reward
+    current.data.push_back(rewardTx);
+
+    current.nonce = 0;    
+    current.hash = calculateHash(current);
+
     while (current.hash.substr(0, difficulty) != std::string(difficulty, '0')) {
         current.nonce++;
         current.hash = calculateHash(current);
     }
 
-    // Apply transactions
+    std::cout << "Mined block " << current.index << " with hash: " << current.hash << "\n";    
     updateBalances(current);
-    // Create next block
+
     Block newBlock;
     newBlock.index = chain.size();
     newBlock.previousHash = current.hash;
     newBlock.timestamp = std::time(nullptr);
-    newBlock.hash = calculateHash(newBlock);
     newBlock.nonce = 0;
-
-    std::cout << "Mined block " << newBlock.index << " with hash: " << newBlock.hash << "\n";    
+    newBlock.difficulty = difficulty;
+    newBlock.hash = calculateHash(newBlock);
 
     chain.push_back(newBlock);
     adjustDifficulty();
@@ -203,22 +221,56 @@ void Blockchain::updateBalances(const Block &block) {
     }
 }
 
+void Blockchain::addToChain(const Block& newBlock) {
+    chain.push_back(newBlock);
+    updateBalances(newBlock);
+}
 
 bool Blockchain::submitTransaction(const TransactionData& tx) {
-    if (balances[tx.sender] < tx.amount)
+    if (chain.empty()) {
+        createGenesisBlock();
+    }
+
+    double pending = calculatePendingSpent(tx.sender);
+
+    if (balances[tx.sender] - pending < tx.amount + TRANSACTION_FEE) {
+        std::cerr << "Transaction rejected: insufficient funds for " << tx.sender << "\n";
         return false;
+    }
 
     Block& current = chain.back();
-std::cout << "hit";
-    if (current.data.size() >= MAX_TX_PER_BLOCK)
-        return false; // block full → miner must mine it
+
+    if (current.data.size() >= MAX_TX_PER_BLOCK) {
+        std::cerr << "Transaction rejected: current block is full\n";
+        return false;
+    }
 
     current.data.push_back(tx);
-    std::cout << "Transaction submitted: " << tx.sender << " -> " << tx.recipient << " : " << tx.amount << "\n";
+
+    std::cout << "Transaction submitted: "
+              << tx.sender << " -> " << tx.recipient
+              << " : " << tx.amount << "\n";
+
     return true;
 }
 
+bool Blockchain::verifyMinedBlock(const Block& block) {
+    std::string hash = calculateHash(block);
+    return (hash == block.hash) && (hash.substr(0, difficulty) == std::string(difficulty, '0'));
+}
 
+
+double Blockchain::calculatePendingSpent(const std::string& sender) const {
+    const Block& current = chain.back();
+    double spent = 0.0;
+
+    for (const auto& tx : current.data) {
+        if (tx.sender == sender)
+            spent += tx.amount;
+    }
+
+    return spent;
+}
 
 int main() {
     Blockchain myBlockchain;
@@ -226,11 +278,22 @@ int main() {
     TransactionData transaction1 = {"Alice", "Bob", 10.0};
     TransactionData transaction2 = {"Bob", "Charlie", 5.0};
 
-    myBlockchain.submitTransaction(transaction1);
-    myBlockchain.submitTransaction(transaction2);
+    if (!myBlockchain.submitTransaction(transaction1)) {
+        std::cerr << "Failed to submit transaction 1\n";
+    }
+    if (!myBlockchain.submitTransaction(transaction2)) {
+        std::cerr << "Failed to submit transaction 2\n";
+    }
+    Block blk = myBlockchain.getLatestBlock();
 
-    
     myBlockchain.mineCurrentBlock();
+    if (myBlockchain.verifyMinedBlock(blk)) {
+        std::cout << "Block verified successfully!\n";
+        myBlockchain.addToChain(blk);
+    } else {
+        std::cerr << "Block verification failed!\n";
+    }
+    
     myBlockchain.printChain();
     std::cout << "Current difficulty: " << myBlockchain.getDifficultyString() << "\n";
     myBlockchain.saveToFile("blockchain_data.txt");
