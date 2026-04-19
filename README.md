@@ -63,7 +63,7 @@ Features, structure, and documentation will continue to evolve as the implementa
 ### 1. Add transactions
 Transactions are added to a pending pool:
 
-```cpp
+cpp
 pendingTransactions.push_back({ "alice", "bob", 50.0 });
 2. Mine a block
 
