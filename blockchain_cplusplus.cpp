@@ -4,6 +4,8 @@
 #include <ctime>
 #include <unordered_map>
 #include <fstream>
+#include <limits>
+#include <algorithm>
 #include "sha256.h"
 
 const int DIFFICULTY_ADJUSTMENT_INTERVAL = 5; // 5 blocks
@@ -36,19 +38,21 @@ public:
     Blockchain();
     void createGenesisBlock();
     void mineCurrentBlock(const std::string& minerAddress = "NETWORK");//this needs to go to client, not blockchain
-    void addToChain(const Block& newBlock);
+    bool submitTransaction(const TransactionData &tx);//set tx into block
+    void printChain() const;
+    void printBlock(const Block& block) const;
+    bool verifyMinedBlock(const Block& block);
+    Block initNewBlock();
+    void saveToFile(const std::string& filename) const;
+
+    std::string getDifficultyString() const { return std::string(difficulty, '0'); }
     std::vector<Block> getChain() const { return chain; };
     double getBalance(const std::string& address);
     Block getLatestBlock() const { return chain.back(); };
     std::unordered_map<std::string, double> getBalances() const { return balances; };
-    bool submitTransaction(const TransactionData &tx);//set tx into block
-    void printChain() const;
-    void printBlock(const Block& block) const;
-    void saveToFile(const std::string& filename) const;
-    std::string getDifficultyString() const { return std::string(difficulty, '0'); }
-    bool verifyMinedBlock(const Block& block);
-   
+
 private:
+    std::vector<TransactionData> pendingTransactions;
     std::vector<Block> chain;
     int difficulty = 4; 
     std::unordered_map<std::string, double> balances; 
@@ -67,40 +71,34 @@ void Blockchain::createGenesisBlock() {
     Block genesisBlock;
     genesisBlock.index = 0;
     genesisBlock.previousHash = "0";
-    genesisBlock.data = {};
-    genesisBlock.timestamp = std::time(0);
-    genesisBlock.hash = this->calculateHash(genesisBlock);
+    genesisBlock.timestamp = std::time(nullptr);
     genesisBlock.nonce = 0;
     genesisBlock.difficulty = difficulty;
+    genesisBlock.data = { {"NETWORK", "GENESIS", 100.0} };
+    genesisBlock.hash = calculateHash(genesisBlock);
+
+    updateBalances(genesisBlock);
     chain.push_back(genesisBlock);
 }
 
 void Blockchain::mineCurrentBlock(const std::string& minerAddress) {
-    Block& current = chain.back();
+    Block block = initNewBlock();
 
-    TransactionData rewardTx = {"NETWORK", minerAddress, 1.0}; // reward
-    current.data.push_back(rewardTx);
+    size_t take = std::min(pendingTransactions.size(), MAX_TX_PER_BLOCK - 1);
+    block.data.assign(pendingTransactions.begin(), pendingTransactions.begin() + take);
+    pendingTransactions.erase(pendingTransactions.begin(), pendingTransactions.begin() + take);
 
-    current.nonce = 0;    
-    current.hash = calculateHash(current);
+    block.data.push_back({"NETWORK", minerAddress, 1.0}); // reward
 
-    while (current.hash.substr(0, difficulty) != std::string(difficulty, '0')) {
-        current.nonce++;
-        current.hash = calculateHash(current);
+    block.hash = calculateHash(block);
+    while (block.hash.substr(0, difficulty) != std::string(difficulty, '0')) {
+        block.nonce++;
+        block.hash = calculateHash(block);
     }
 
-    std::cout << "Mined block " << current.index << " with hash: " << current.hash << "\n";    
-    updateBalances(current);
-
-    Block newBlock;
-    newBlock.index = chain.size();
-    newBlock.previousHash = current.hash;
-    newBlock.timestamp = std::time(nullptr);
-    newBlock.nonce = 0;
-    newBlock.difficulty = difficulty;
-    newBlock.hash = calculateHash(newBlock);
-
-    chain.push_back(newBlock);
+    std::cout << "Mined block " << block.index << " with hash: " << block.hash << "\n";
+    updateBalances(block);
+    chain.push_back(block);
     adjustDifficulty();
 }
 
@@ -221,16 +219,7 @@ void Blockchain::updateBalances(const Block &block) {
     }
 }
 
-void Blockchain::addToChain(const Block& newBlock) {
-    chain.push_back(newBlock);
-    updateBalances(newBlock);
-}
-
 bool Blockchain::submitTransaction(const TransactionData& tx) {
-    if (chain.empty()) {
-        createGenesisBlock();
-    }
-
     double pending = calculatePendingSpent(tx.sender);
 
     if (balances[tx.sender] - pending < tx.amount + TRANSACTION_FEE) {
@@ -238,14 +227,7 @@ bool Blockchain::submitTransaction(const TransactionData& tx) {
         return false;
     }
 
-    Block& current = chain.back();
-
-    if (current.data.size() >= MAX_TX_PER_BLOCK) {
-        std::cerr << "Transaction rejected: current block is full\n";
-        return false;
-    }
-
-    current.data.push_back(tx);
+    pendingTransactions.push_back(tx);
 
     std::cout << "Transaction submitted: "
               << tx.sender << " -> " << tx.recipient
@@ -259,44 +241,86 @@ bool Blockchain::verifyMinedBlock(const Block& block) {
     return (hash == block.hash) && (hash.substr(0, difficulty) == std::string(difficulty, '0'));
 }
 
+Block Blockchain::initNewBlock() {
+    Block block;
+    block.index = chain.size();
+    block.previousHash = chain.empty() ? "0" : chain.back().hash;
+    block.timestamp = std::time(nullptr);
+    block.nonce = 0;
+    block.difficulty = difficulty;
+    block.data = {};
+    return block;
+}
+
 
 double Blockchain::calculatePendingSpent(const std::string& sender) const {
-    const Block& current = chain.back();
     double spent = 0.0;
-
-    for (const auto& tx : current.data) {
+    for (const auto& tx : pendingTransactions) {
         if (tx.sender == sender)
-            spent += tx.amount;
+            spent += tx.amount + TRANSACTION_FEE;
     }
-
     return spent;
+}
+
+static void flushLine() {
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
 
 int main() {
     Blockchain myBlockchain;
 
-    TransactionData transaction1 = {"Alice", "Bob", 10.0};
-    TransactionData transaction2 = {"Bob", "Charlie", 5.0};
+    while (true) {
+        std::cout << "\n=== Menu ===\n"
+                  << "1. Mine current block\n"
+                  << "2. Print chain\n"
+                  << "3. Create transaction\n"
+                  << "4. Get balance\n"
+                  << "5. Save & exit\n"
+                  << "Choice: ";
 
-    if (!myBlockchain.submitTransaction(transaction1)) {
-        std::cerr << "Failed to submit transaction 1\n";
-    }
-    if (!myBlockchain.submitTransaction(transaction2)) {
-        std::cerr << "Failed to submit transaction 2\n";
-    }
-    Block blk = myBlockchain.getLatestBlock();
+        int choice;
+        if (!(std::cin >> choice)) {
+            std::cin.clear();
+            flushLine();
+            std::cout << "Invalid input.\n";
+            continue;
+        }
 
-    myBlockchain.mineCurrentBlock();
-    if (myBlockchain.verifyMinedBlock(blk)) {
-        std::cout << "Block verified successfully!\n";
-        myBlockchain.addToChain(blk);
-    } else {
-        std::cerr << "Block verification failed!\n";
+        if (choice == 1) {
+            std::cout << "Miner address: ";
+            std::string miner;
+            std::cin >> miner;
+            myBlockchain.mineCurrentBlock(miner);
+        } else if (choice == 2) {
+            myBlockchain.printChain();
+            std::cout << "Current difficulty: " << myBlockchain.getDifficultyString() << "\n";
+        } else if (choice == 3) {
+            std::string sender, recipient;
+            double amount;
+            std::cout << "Sender: ";
+            std::cin >> sender;
+            std::cout << "Recipient: ";
+            std::cin >> recipient;
+            std::cout << "Amount: ";
+            if (!(std::cin >> amount)) {
+                std::cin.clear();
+                flushLine();
+                std::cout << "Invalid amount.\n";
+                continue;
+            }
+            myBlockchain.submitTransaction({sender, recipient, amount});
+        } else if (choice == 4) {
+            std::cout << "Address: ";
+            std::string addr;
+            std::cin >> addr;
+            std::cout << "Balance: " << myBlockchain.getBalance(addr) << "\n";
+        } else if (choice == 5) {
+            myBlockchain.saveToFile("blockchain_data.txt");
+            break;
+        } else {
+            std::cout << "Unknown choice.\n";
+        }
     }
-    
-    myBlockchain.printChain();
-    std::cout << "Current difficulty: " << myBlockchain.getDifficultyString() << "\n";
-    myBlockchain.saveToFile("blockchain_data.txt");
 
     return 0;
 }
